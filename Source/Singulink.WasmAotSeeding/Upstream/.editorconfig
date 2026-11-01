@@ -1,0 +1,25 @@
+# The files of this folder copy the AOT wrapper seeding of Uno.Wasm.Bootstrap (see "Maintenance" in README.md), and stay as close to it as they
+# can, so that a diff against a later version only shows what changed there. These rules would change many lines that it writes otherwise.
+
+[*.cs]
+
+# CS1573: Parameter has no matching param tag in the XML comment (but other parameters do)
+dotnet_diagnostic.CS1573.severity = none
+
+# IDE0008: Use explicit type instead of 'var'
+dotnet_diagnostic.IDE0008.severity = none
+
+# RCS1139: Add summary element to documentation comment
+dotnet_diagnostic.RCS1139.severity = none
+
+# SA1122: Use string.Empty for empty strings
+dotnet_diagnostic.SA1122.severity = none
+
+# SA1132: Each field should be declared on its own line
+dotnet_diagnostic.SA1132.severity = none
+
+# SA1508: A closing brace should not be preceded by a blank line
+dotnet_diagnostic.SA1508.severity = none
+
+# SA1623: The property's documentation summary text should begin with: 'Gets'
+dotnet_diagnostic.SA1623.severity = none

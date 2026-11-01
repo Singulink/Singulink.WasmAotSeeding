@@ -1,0 +1,17 @@
+# Editor config overrides specifically for test projects
+
+
+########### C# files ###########
+[*.cs]
+
+#### Analyzer diagnostics ####
+
+stylecop.documentation.documentExposedElements = false
+
+# CA2007: Consider calling ConfigureAwait on the awaited task
+dotnet_diagnostic.CA2007.severity = none
+
+# The code that the generator tests generate seeds from: its shapes (names, layouts, parameters, attributes) are what the tests are about, so the
+# analyzers leave it as it is.
+[Singulink.WasmAotSeeding.Tests/Samples/**.cs]
+generated_code = true

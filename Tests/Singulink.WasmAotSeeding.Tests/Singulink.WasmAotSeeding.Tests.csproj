@@ -1,0 +1,24 @@
+﻿<Project Sdk="MSTest.Sdk/4.5.2">
+
+  <!-- The tests of the generator and the checker, which call them directly. Most are ports of Uno.Wasm.Bootstrap's tests of its seeding. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+
+    <!-- Function pointers in the seeding samples -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Mono.Cecil" />
+    <PackageReference Include="Shouldly" />
+
+    <!-- The tests generate seeds from this assembly's samples, whose code they expect as the compiler writes it, without injected null checks. -->
+    <PackageReference Remove="Singulink.RuntimeNullables" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Source\Singulink.WasmAotSeeding\Singulink.WasmAotSeeding.csproj" />
+  </ItemGroup>
+
+</Project>

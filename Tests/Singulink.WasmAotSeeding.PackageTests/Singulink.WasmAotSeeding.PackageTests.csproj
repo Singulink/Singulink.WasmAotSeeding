@@ -1,0 +1,25 @@
+﻿<Project Sdk="MSTest.Sdk/4.5.2">
+
+  <!--
+    Builds projects with the package built from this repository, with the newest .NET SDK of the dotnet on PATH: mock apps that import its build
+    files from the extracted package and stand in for the .NET WebAssembly SDK, and a project that restores it from a local feed.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Shouldly" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Building it creates the package (GeneratePackageOnBuild), whose version is the product version of the generator. -->
+    <ProjectReference Include="..\..\Source\Singulink.WasmAotSeeding\Singulink.WasmAotSeeding.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="PackageDirectory" Value="$(MSBuildThisFileDirectory)..\..\Source\Singulink.WasmAotSeeding\bin\$(Configuration)\" />
+  </ItemGroup>
+
+</Project>

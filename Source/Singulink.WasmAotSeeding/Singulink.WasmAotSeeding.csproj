@@ -1,0 +1,81 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- The generator that build\Singulink.WasmAotSeeding.targets runs with dotnet exec, in a process of its own: see README.md. -->
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- Runs on a later .NET too, when the machine that builds the app has no .NET 10 runtime. -->
+    <RollForward>Major</RollForward>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- dotnet exec runs the assembly, so the package has no native launcher, which would only run on one operating system. -->
+    <UseAppHost>false</UseAppHost>
+
+    <PackageId>Singulink.WasmAotSeeding</PackageId>
+    <PackageTags>WebAssembly; WASM; AOT; Mono; Uno; browserwasm; interpreter</PackageTags>
+    <Description>Keeps Mono WebAssembly apps that are AOT-compiled with an AOT profile from crashing on methods that the profile doesn't list.</Description>
+    <DevelopmentDependency>true</DevelopmentDependency>
+
+    <!--
+      The package only has build logic and the generator, in tools/ rather than lib/ since the build runs it rather than the project referencing
+      it. The generator's dependencies are in tools/ with it, so the package has none.
+    -->
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);_AddGeneratorToPackage</TargetsForTfmSpecificContentInPackage>
+    <NoWarn>$(NoWarn);NU5100</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Mono.Cecil" />
+  </ItemGroup>
+
+  <!--
+    The generator reads assemblies without their symbols and doesn't use Mono.Cecil.Rocks, so the assemblies of the Mono.Cecil package other than
+    Mono.Cecil.dll stay out of its output, its deps.json and the package.
+  -->
+  <Target Name="_RemoveUnusedCecilAssemblies" AfterTargets="ResolvePackageAssets">
+    <ItemGroup>
+      <RuntimeCopyLocalItems Remove="@(RuntimeCopyLocalItems)"
+                             Condition="'%(Filename)' == 'Mono.Cecil.Mdb' or '%(Filename)' == 'Mono.Cecil.Pdb' or '%(Filename)' == 'Mono.Cecil.Rocks'" />
+    </ItemGroup>
+  </Target>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Singulink.WasmAotSeeding.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- NuGet only imports build files named after the package. The file has that name here too, so that the tests import the same name. -->
+    <None Update="build\$(PackageId).targets" Pack="true" PackagePath="build\$(PackageId).targets" />
+  </ItemGroup>
+
+  <Target Name="_CheckBuildFileName" BeforeTargets="GenerateNuspec">
+    <Error Condition="!Exists('build\$(PackageId).targets')" Text="The build file must be named after the package ID: build\$(PackageId).targets." />
+  </Target>
+
+  <!--
+    Adds the generator to tools/<target framework>/ as dotnet publish would lay it out (the assembly, its symbols, runtimeconfig.json, deps.json and
+    Mono.Cecil), and build/<package ID>.props, which gives the targets the package version for the name of the seeding's stamp.
+  -->
+  <Target Name="_AddGeneratorToPackage" DependsOnTargets="ResolveReferences">
+    <PropertyGroup>
+      <_VersionPropsFile>$(IntermediateOutputPath)$(PackageId).props</_VersionPropsFile>
+      <_VersionProps>
+        <![CDATA[<Project>
+  <!-- Written when the package is packed: the version names the stamp of the AOT wrapper seeding (see $(PackageId).targets). -->
+  <PropertyGroup>
+    <_AotWrapperSeedingVersion>$(PackageVersion)</_AotWrapperSeedingVersion>
+  </PropertyGroup>
+</Project>]]>
+      </_VersionProps>
+    </PropertyGroup>
+
+    <WriteLinesToFile File="$(_VersionPropsFile)" Lines="$(_VersionProps)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+
+    <ItemGroup>
+      <_GeneratorFile Include="$(TargetPath);$(TargetDir)$(TargetName).pdb;$(ProjectRuntimeConfigFilePath);$(ProjectDepsFilePath)" />
+      <_GeneratorFile Include="@(ReferenceCopyLocalPaths)" Condition="'%(Extension)' == '.dll'" />
+      <TfmSpecificPackageFile Include="@(_GeneratorFile)" PackagePath="tools\$(TargetFramework)\" />
+      <TfmSpecificPackageFile Include="$(_VersionPropsFile)" PackagePath="build\$(PackageId).props" />
+    </ItemGroup>
+  </Target>
+</Project>

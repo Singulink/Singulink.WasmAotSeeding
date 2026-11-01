@@ -1,0 +1,433 @@
+<Project>
+  <!--
+    Singulink.WasmAotSeeding: AOT wrapper seeding for profile-guided Mono WebAssembly AOT builds, the seeding that
+    https://github.com/unoplatform/Uno.Wasm.Bootstrap/pull/1117 proposes to add to Uno.Wasm.Bootstrap, for apps whose bootstrapper doesn't have it.
+    See README.md in the package, or https://github.com/Singulink/Singulink.WasmAotSeeding.
+
+    NuGet imports this file for every target framework of the projects that reference the package. It does nothing unless the project builds for
+    WebAssembly (its runtime identifier is browser-wasm, or its target platform is browserwasm, Uno.Sdk's), and the build AOT-compiles with an AOT
+    profile on the Mono runtime: RunAOTCompilation is true and WasmAotProfilePath is set. Uno.Sdk sets WasmAotProfilePath when the project has an
+    aot.profile, and RunAOTCompilation when WasmShellMonoRuntimeExecutionMode is InterpreterAndAOT.
+
+      1. Before the AOT compilation (_WasmAotCompileApp), AotWrapperSeedingGenerate runs the package's generator (dotnet exec) over the assemblies
+         about to be AOT-compiled, unless its files are up to date. It writes a seed assembly and a profile that lists its seed methods. The seed
+         assembly joins the AOT inputs and the profile joins WasmAotProfilePath, so the compiler emits the interpreter entry wrappers that methods
+         missing from the app's profile need.
+      2. After the AOT compilation, AotWrapperSeedingCheck takes the profile out of WasmAotProfilePath again and checks with llvm-nm that every
+         expected wrapper was emitted, failing the build if one is missing.
+
+    When the app's Uno.Wasm.Bootstrap has its own seeding (its targets define WasmShellEnableAOTWrapperSeeding), the package turns itself off with
+    the AOTSEED007 warning, so that the build is never seeded twice.
+
+    Properties:
+      WasmAotWrapperSeeding               false turns the seeding off (default true).
+      WasmAotWrapperSeedingCheck          false turns the check off (default true); the seeding still applies.
+      WasmAotWrapperSeedingAssemblyName   name of the seed assembly (default AotWrapperSeeds).
+
+    This depends on names of the .NET WebAssembly SDK that aren't public (README.md, "Maintenance") and on internals of the Mono AOT compiler. It
+    was verified on Windows against .NET 10.0.12 and 10.0.14.
+  -->
+  <!--
+    Projects of the .NET WebAssembly SDK (Microsoft.NET.Sdk.WebAssembly, Blazor) target plain net10.0 with the browser-wasm runtime identifier, which
+    their SDK's props set. Uno.Sdk's projects target the browserwasm platform.
+  -->
+  <PropertyGroup>
+    <_AotWrapperSeedingPlatform Condition="'$(RuntimeIdentifier)' == 'browser-wasm'">true</_AotWrapperSeedingPlatform>
+    <_AotWrapperSeedingPlatform Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'browserwasm'">true</_AotWrapperSeedingPlatform>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(_AotWrapperSeedingPlatform)' == 'true'">
+    <WasmAotWrapperSeeding Condition="'$(WasmAotWrapperSeeding)' == ''">true</WasmAotWrapperSeeding>
+    <WasmAotWrapperSeedingCheck Condition="'$(WasmAotWrapperSeedingCheck)' == ''">true</WasmAotWrapperSeedingCheck>
+    <WasmAotWrapperSeedingAssemblyName Condition="'$(WasmAotWrapperSeedingAssemblyName)' == ''">AotWrapperSeeds</WasmAotWrapperSeedingAssemblyName>
+  </PropertyGroup>
+
+  <Target Name="_AotWrapperSeedingProperties">
+    <PropertyGroup>
+      <!-- The pages the build messages point to -->
+      <_AotWrapperSeedingDocs>https://github.com/Singulink/Singulink.WasmAotSeeding</_AotWrapperSeedingDocs>
+      <_AotWrapperSeedingIssues>https://github.com/Singulink/Singulink.WasmAotSeeding/issues</_AotWrapperSeedingIssues>
+      <_AotWrapperSeedingIsWindows>$([MSBuild]::IsOSPlatform('Windows'))</_AotWrapperSeedingIsWindows>
+
+      <!-- A folder of its own: Uno.Wasm.Bootstrap's seeding writes to aot-wrapper-seeding -->
+      <_AotWrapperSeedingDir>$(IntermediateOutputPath)wasm-aot-seeding</_AotWrapperSeedingDir>
+      <_AotWrapperSeedingDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(_AotWrapperSeedingDir)'))</_AotWrapperSeedingDir>
+      <_AotWrapperSeedAssembly>$(_AotWrapperSeedingDir)$(WasmAotWrapperSeedingAssemblyName).dll</_AotWrapperSeedAssembly>
+      <_AotWrapperSeedProfile>$(_AotWrapperSeedingDir)$(WasmAotWrapperSeedingAssemblyName).profile</_AotWrapperSeedProfile>
+      <_AotWrapperSeedExpectedWrappers>$(_AotWrapperSeedingDir)$(WasmAotWrapperSeedingAssemblyName).wrappers.txt</_AotWrapperSeedExpectedWrappers>
+      <_AotWrapperSeedingAssemblies>$(_AotWrapperSeedingDir)assemblies.txt</_AotWrapperSeedingAssemblies>
+
+      <!--
+        Named after the seed assembly, so that switching back to an earlier name doesn't apply its files without generating them again, and after
+        the package version, which Singulink.WasmAotSeeding.props sets: the files of another version can be older than the stamp.
+      -->
+      <_AotWrapperSeedingStamp>$(_AotWrapperSeedingDir)$(WasmAotWrapperSeedingAssemblyName).$(_AotWrapperSeedingVersion).stamp</_AotWrapperSeedingStamp>
+
+      <!-- The list of the bitcode that the AOT compilation compiled with the seeds (_AotWrapperSeedingForget) -->
+      <_AotWrapperSeedingCompiled>$(_AotWrapperSeedingDir)compiled-with-seeds.txt</_AotWrapperSeedingCompiled>
+
+      <!-- The folders the generator and the checker write their warnings and errors to, one file per code -->
+      <_AotWrapperSeedingGenerationMessages>$(_AotWrapperSeedingDir)messages-generation</_AotWrapperSeedingGenerationMessages>
+      <_AotWrapperSeedingGenerationMessages>$([MSBuild]::EnsureTrailingSlash('$(_AotWrapperSeedingGenerationMessages)'))</_AotWrapperSeedingGenerationMessages>
+      <_AotWrapperSeedingCheckMessages>$(_AotWrapperSeedingDir)messages-check</_AotWrapperSeedingCheckMessages>
+      <_AotWrapperSeedingCheckMessages>$([MSBuild]::EnsureTrailingSlash('$(_AotWrapperSeedingCheckMessages)'))</_AotWrapperSeedingCheckMessages>
+
+      <!-- The generator and the checker, in the package's tools folder -->
+      <_AotWrapperSeedingToolDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..', 'tools', 'net10.0'))</_AotWrapperSeedingToolDir>
+      <_AotWrapperSeedingTool Condition="'$(_AotWrapperSeedingTool)' == ''">$(_AotWrapperSeedingToolDir)Singulink.WasmAotSeeding.dll</_AotWrapperSeedingTool>
+
+      <!--
+        The generator runs in a process of its own, so that no build node or IDE keeps it loaded, with the dotnet of the SDK that builds the app, so
+        that it finds that SDK's runtimes: DOTNET_HOST_PATH, which the .NET CLI sets, or else, as the SDK's Razor and static web assets targets do,
+        the dotnet in NetCoreRoot, the SDK's root folder (Visual Studio and Rider builds), or else the dotnet on the PATH. It needs .NET 10 or later,
+        and runs on a later .NET too (RollForward is Major). dotnet exec only runs the assembly: it doesn't build anything, run MSBuild or run the
+        .NET CLI's first-run steps, so the build's environment, which points to the build's SDK and MSBuild, doesn't concern it, and it never turns
+        to the .NET SDK, as dotnet <file> does when the file is missing.
+      -->
+      <_AotWrapperSeedingDotnetName>dotnet</_AotWrapperSeedingDotnetName>
+      <_AotWrapperSeedingDotnetName Condition="'$(_AotWrapperSeedingIsWindows)' == 'true'">dotnet.exe</_AotWrapperSeedingDotnetName>
+      <_AotWrapperSeedingNetCoreRoot Condition="'$(NetCoreRoot)' != ''">$([MSBuild]::EnsureTrailingSlash('$(NetCoreRoot)'))</_AotWrapperSeedingNetCoreRoot>
+      <_AotWrapperSeedingNetCoreDotnet>$(_AotWrapperSeedingNetCoreRoot)$(_AotWrapperSeedingDotnetName)</_AotWrapperSeedingNetCoreDotnet>
+      <_AotWrapperSeedingDotnet>$(DOTNET_HOST_PATH)</_AotWrapperSeedingDotnet>
+      <_AotWrapperSeedingDotnet Condition="'$(_AotWrapperSeedingDotnet)' == '' and '$(_AotWrapperSeedingNetCoreRoot)' != ''
+                                           and Exists('$(_AotWrapperSeedingNetCoreDotnet)')">$(_AotWrapperSeedingNetCoreDotnet)</_AotWrapperSeedingDotnet>
+      <_AotWrapperSeedingDotnet Condition="'$(_AotWrapperSeedingDotnet)' == ''">dotnet</_AotWrapperSeedingDotnet>
+      <_AotWrapperSeedingRun>&quot;$(_AotWrapperSeedingDotnet)&quot; exec &quot;$(_AotWrapperSeedingTool)&quot;</_AotWrapperSeedingRun>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <!-- The generator, its runtime configuration and this package's files, which the generation depends on along with the AOT inputs -->
+      <_AotWrapperSeedingGenerator Include="$(_AotWrapperSeedingToolDir)*.dll;$(_AotWrapperSeedingToolDir)*.json" />
+      <_AotWrapperSeedingGenerator Include="$(_AotWrapperSeedingTool);$(MSBuildThisFileFullPath);$(MSBuildThisFileDirectory)$(MSBuildThisFileName).props" />
+    </ItemGroup>
+  </Target>
+
+  <!--
+    Uno.Wasm.Bootstrap's own seeding, with which seeding again would conflict: its targets define WasmShellEnableAOTWrapperSeeding, its generation
+    target sets _UnoAOTWrapperSeedingRan when it runs first, and its seed assembly, Uno.Wasm.AotWrapperSeeds, is then among the AOT inputs. These
+    are the names of https://github.com/unoplatform/Uno.Wasm.Bootstrap/pull/1117 at 924a8dba50, which may change before it ships. Read just before
+    the generation, when the last two can be known. A project that sets WasmShellEnableAOTWrapperSeeding itself turns the package off too.
+  -->
+  <Target Name="_AotWrapperSeedingFindOfficial">
+    <PropertyGroup>
+      <_AotWrapperSeedingOfficialSeeds>@(_WasmAssembliesInternal->WithMetadataValue('Filename', 'Uno.Wasm.AotWrapperSeeds'))</_AotWrapperSeedingOfficialSeeds>
+      <_AotWrapperSeedingOfficial Condition="'$(WasmShellEnableAOTWrapperSeeding)' != '' or '$(_UnoAOTWrapperSeedingRan)' == 'true'
+                                             or '$(_AotWrapperSeedingOfficialSeeds)' != ''">true</_AotWrapperSeedingOfficial>
+    </PropertyGroup>
+  </Target>
+
+  <!--
+    It only applies to the Mono runtime, whose AOT compilation it hooks: with UseMonoRuntime set to false (CoreCLR), the SDK has no
+    _WasmAotCompileApp target.
+  -->
+  <Target Name="AotWrapperSeedingGenerate"
+          BeforeTargets="_WasmAotCompileApp"
+          DependsOnTargets="_AotWrapperSeedingProperties;_AotWrapperSeedingFindOfficial;_AotWrapperSeedingPrepare;_AotWrapperSeedingGenerateCore"
+          Condition="'$(_AotWrapperSeedingPlatform)' == 'true' and '$(WasmAotWrapperSeeding)' == 'true' and '$(RunAOTCompilation)' == 'true'
+                     and '$(_WasmShouldAOT)' == 'true' and '$(WasmAotProfilePath)' != '' and '$(UseMonoRuntime)' != 'false'">
+
+    <PropertyGroup>
+      <_AotWrapperSeedingRan>true</_AotWrapperSeedingRan>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(_AotWrapperSeedingOfficial)' == 'true'">
+      <_AotWrapperSeedingStepAside>The app's Uno.Wasm.Bootstrap has its own AOT wrapper seeding (its targets or the project define</_AotWrapperSeedingStepAside>
+      <_AotWrapperSeedingStepAside>$(_AotWrapperSeedingStepAside) WasmShellEnableAOTWrapperSeeding, or its seeding ran), so the</_AotWrapperSeedingStepAside>
+      <_AotWrapperSeedingStepAside>$(_AotWrapperSeedingStepAside) Singulink.WasmAotSeeding package is off: remove its</_AotWrapperSeedingStepAside>
+      <_AotWrapperSeedingStepAside>$(_AotWrapperSeedingStepAside) PackageReference (see &quot;Removing It&quot; in its README).</_AotWrapperSeedingStepAside>
+      <_AotWrapperSeedingStepAside>$(_AotWrapperSeedingStepAside) The bootstrapper's properties are</_AotWrapperSeedingStepAside>
+      <_AotWrapperSeedingStepAside>$(_AotWrapperSeedingStepAside) WasmShellEnableAOTWrapperSeeding and</_AotWrapperSeedingStepAside>
+      <_AotWrapperSeedingStepAside>$(_AotWrapperSeedingStepAside) WasmShellEnableAOTWrapperSeedingCheck, and its messages</_AotWrapperSeedingStepAside>
+      <_AotWrapperSeedingStepAside>$(_AotWrapperSeedingStepAside) UNOWASM006 to UNOWASM011. See $(_AotWrapperSeedingDocs)</_AotWrapperSeedingStepAside>
+    </PropertyGroup>
+
+    <Warning Condition="'$(_AotWrapperSeedingOfficial)' == 'true'" Code="AOTSEED007" Text="$(_AotWrapperSeedingStepAside)" />
+
+    <!--
+      Deduplication puts the wrappers into the aot-instances module, which the runtime searches. Without it, they would only be in the seed
+      assembly's module, which the runtime never loads: nothing references the seed assembly, and it isn't published.
+    -->
+    <PropertyGroup Condition="'$(_AotWrapperSeedingOfficial)' != 'true' and '$(WasmDedup)' != 'true'">
+      <_AotWrapperSeedingSkipped>Skipped the AOT wrapper seeding of this profile-guided AOT build because AOT deduplication is off</_AotWrapperSeedingSkipped>
+      <_AotWrapperSeedingSkipped>$(_AotWrapperSeedingSkipped) (WasmShellEnableAOTDeduplication or WasmDedup is false), so the app</_AotWrapperSeedingSkipped>
+      <_AotWrapperSeedingSkipped>$(_AotWrapperSeedingSkipped) can still crash as described in $(_AotWrapperSeedingDocs). Turn</_AotWrapperSeedingSkipped>
+      <_AotWrapperSeedingSkipped>$(_AotWrapperSeedingSkipped) deduplication back on, or set WasmAotWrapperSeeding to false to remove</_AotWrapperSeedingSkipped>
+      <_AotWrapperSeedingSkipped>$(_AotWrapperSeedingSkipped) the warning.</_AotWrapperSeedingSkipped>
+    </PropertyGroup>
+
+    <Warning Condition="'$(_AotWrapperSeedingOfficial)' != 'true' and '$(WasmDedup)' != 'true'" Code="AOTSEED004" Text="$(_AotWrapperSeedingSkipped)" />
+
+    <PropertyGroup Condition="'$(_AotWrapperSeedingOfficial)' != 'true' and '$(WasmDedup)' == 'true' and Exists('$(_AotWrapperSeedingStamp)')">
+      <_AotWrapperSeedingApplied>true</_AotWrapperSeedingApplied>
+    </PropertyGroup>
+
+    <ItemGroup Condition="'$(_AotWrapperSeedingApplied)' == 'true'">
+      <_WasmAssembliesInternal Include="$(_AotWrapperSeedAssembly)" />
+    </ItemGroup>
+
+    <!--
+      The AOT compiler merges the profiles it's given, so the app's profile still decides which of its methods are compiled. Other targets read
+      WasmAotProfilePath as a single file (the bootstrapper's ShellTask_v0, for example), so AotWrapperSeedingCheck takes the seed profile out again
+      after the AOT compilation.
+    -->
+    <PropertyGroup Condition="'$(_AotWrapperSeedingApplied)' == 'true'">
+      <WasmAotProfilePath>$(WasmAotProfilePath);$(_AotWrapperSeedProfile)</WasmAotProfilePath>
+    </PropertyGroup>
+  </Target>
+
+  <!--
+    The AOT compiler compiles again only when one of its inputs is newer than its outputs, so when the seeding doesn't apply after it did (the
+    generation failed, the seeding or deduplication was turned off, or the bootstrapper's own seeding took over), dropping the seed assembly from its
+    inputs leaves the deduplicated instances it compiled with the seeds in place. Deleting their bitcode, which AotWrapperSeedingCheck lists, makes it
+    compile them again without the seeds. MSBuild runs this after AotWrapperSeedingGenerate even when that is skipped, as it is in the builds that
+    reach _WasmAotCompileApp without AOT-compiling (_WasmShouldAOT is false): the builds of Release apps that build native code, such as Uno.Sdk's
+    with InterpreterAndAOT, which must leave the code that the last publish compiled with the seeds in place.
+  -->
+  <Target Name="_AotWrapperSeedingForget"
+          AfterTargets="AotWrapperSeedingGenerate"
+          DependsOnTargets="_AotWrapperSeedingProperties"
+          Condition="'$(_AotWrapperSeedingPlatform)' == 'true' and '$(_WasmShouldAOT)' == 'true' and '$(_AotWrapperSeedingApplied)' != 'true'">
+
+    <ReadLinesFromFile File="$(_AotWrapperSeedingCompiled)" Condition="Exists('$(_AotWrapperSeedingCompiled)')">
+      <Output TaskParameter="Lines" ItemName="_AotWrapperSeedingCompiledFile" />
+    </ReadLinesFromFile>
+
+    <Delete Files="@(_AotWrapperSeedingCompiledFile);$(_AotWrapperSeedingCompiled)" />
+  </Target>
+
+  <Target Name="_AotWrapperSeedingPrepare" Condition="'$(_AotWrapperSeedingOfficial)' != 'true' and '$(WasmDedup)' == 'true'">
+    <!-- Generates the files again when one of them is gone -->
+    <Delete Files="$(_AotWrapperSeedingStamp)"
+            Condition="!Exists('$(_AotWrapperSeedAssembly)') or !Exists('$(_AotWrapperSeedProfile)') or !Exists('$(_AotWrapperSeedExpectedWrappers)')" />
+
+    <!--
+      The list of AOT inputs, which passes them to the generator. It's an input of the generation too, as cheap hardening against an assembly leaving
+      the AOT inputs while all the others stay older than the stamp, which can't happen on .NET 10, whose trimmer writes every AOT input again.
+    -->
+    <WriteLinesToFile File="$(_AotWrapperSeedingAssemblies)" Lines="@(_WasmAssembliesInternal->'%(FullPath)')" Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
+
+  <!--
+    Generates the files when an AOT input, the list of them, the generator or this package's build files changed. The generator only writes the
+    files whose content changes, as the AOT compiler compiles all the assemblies again when one of its inputs is newer than its output, and the
+    stamp tells when it last ran.
+  -->
+  <Target Name="_AotWrapperSeedingGenerateCore"
+          Condition="'$(_AotWrapperSeedingOfficial)' != 'true' and '$(WasmDedup)' == 'true'"
+          Inputs="@(_WasmAssembliesInternal);$(_AotWrapperSeedingAssemblies);@(_AotWrapperSeedingGenerator)"
+          Outputs="$(_AotWrapperSeedingStamp)">
+
+    <PropertyGroup>
+      <_AotWrapperSeedingArgs>--assemblies &quot;$(_AotWrapperSeedingAssemblies)&quot;</_AotWrapperSeedingArgs>
+      <_AotWrapperSeedingArgs>$(_AotWrapperSeedingArgs) --seed-assembly &quot;$(_AotWrapperSeedAssembly)&quot;</_AotWrapperSeedingArgs>
+      <_AotWrapperSeedingArgs>$(_AotWrapperSeedingArgs) --seed-profile &quot;$(_AotWrapperSeedProfile)&quot;</_AotWrapperSeedingArgs>
+      <_AotWrapperSeedingArgs>$(_AotWrapperSeedingArgs) --expected-wrappers &quot;$(_AotWrapperSeedExpectedWrappers)&quot;</_AotWrapperSeedingArgs>
+      <_AotWrapperSeedingArgs>$(_AotWrapperSeedingArgs) --messages &quot;$(_AotWrapperSeedingGenerationMessages).&quot;</_AotWrapperSeedingArgs>
+      <_AotWrapperSeedingArgs>$(_AotWrapperSeedingArgs) --docs &quot;$(_AotWrapperSeedingDocs)&quot;</_AotWrapperSeedingArgs>
+      <_AotWrapperSeedingArgs>$(_AotWrapperSeedingArgs) --issues &quot;$(_AotWrapperSeedingIssues)&quot;</_AotWrapperSeedingArgs>
+    </PropertyGroup>
+
+    <RemoveDir Directories="$(_AotWrapperSeedingGenerationMessages)" />
+
+    <!--
+      Exec doesn't read warnings or errors from the output, so that no line of it can fail a good generation: the generator writes them to the
+      messages folder, which the tasks below log. Exit code 10: the generation failed, after an AOTSEED003 warning.
+    -->
+    <Exec Command="$(_AotWrapperSeedingRun) generate $(_AotWrapperSeedingArgs)"
+          IgnoreExitCode="true"
+          IgnoreStandardErrorWarningFormat="true"
+          StdOutEncoding="utf-8"
+          StdErrEncoding="utf-8"
+          StandardOutputImportance="normal"
+          StandardErrorImportance="high">
+      <Output TaskParameter="ExitCode" PropertyName="_AotWrapperSeedingGenerateExitCode" />
+    </Exec>
+
+    <ReadLinesFromFile File="$(_AotWrapperSeedingGenerationMessages)AOTSEED003.txt" Condition="Exists('$(_AotWrapperSeedingGenerationMessages)AOTSEED003.txt')">
+      <Output TaskParameter="Lines" ItemName="_AotWrapperSeedingAOTSEED003" />
+    </ReadLinesFromFile>
+
+    <ReadLinesFromFile File="$(_AotWrapperSeedingGenerationMessages)AOTSEED005.txt" Condition="Exists('$(_AotWrapperSeedingGenerationMessages)AOTSEED005.txt')">
+      <Output TaskParameter="Lines" ItemName="_AotWrapperSeedingAOTSEED005" />
+    </ReadLinesFromFile>
+
+    <ReadLinesFromFile File="$(_AotWrapperSeedingGenerationMessages)AOTSEED006.txt" Condition="Exists('$(_AotWrapperSeedingGenerationMessages)AOTSEED006.txt')">
+      <Output TaskParameter="Lines" ItemName="_AotWrapperSeedingAOTSEED006" />
+    </ReadLinesFromFile>
+
+    <Warning Condition="'%(_AotWrapperSeedingAOTSEED003.Identity)' != ''" Code="AOTSEED003" Text="%(_AotWrapperSeedingAOTSEED003.Identity)" />
+    <Warning Condition="'%(_AotWrapperSeedingAOTSEED005.Identity)' != ''" Code="AOTSEED005" Text="%(_AotWrapperSeedingAOTSEED005.Identity)" />
+    <Warning Condition="'%(_AotWrapperSeedingAOTSEED006.Identity)' != ''" Code="AOTSEED006" Text="%(_AotWrapperSeedingAOTSEED006.Identity)" />
+
+    <!--
+      The stamps of other package versions go, so that going back to one of them doesn't apply these files: the files of that version are older
+      than its stamp.
+    -->
+    <ItemGroup Condition="'$(_AotWrapperSeedingGenerateExitCode)' == '0'">
+      <_AotWrapperSeedingOtherStamp Include="$(_AotWrapperSeedingDir)$(WasmAotWrapperSeedingAssemblyName).*.stamp" Exclude="$(_AotWrapperSeedingStamp)" />
+    </ItemGroup>
+
+    <Delete Files="@(_AotWrapperSeedingOtherStamp)" />
+    <Touch Files="$(_AotWrapperSeedingStamp)" AlwaysCreate="true" Condition="'$(_AotWrapperSeedingGenerateExitCode)' == '0'" />
+
+    <!-- The seeding only adds safety, so a failed generation leaves the build as it would be without it, and the stamp must not apply older files -->
+    <Delete Files="$(_AotWrapperSeedingStamp);$(_AotWrapperSeedAssembly);$(_AotWrapperSeedProfile);$(_AotWrapperSeedExpectedWrappers)"
+            Condition="'$(_AotWrapperSeedingGenerateExitCode)' != '0'" />
+
+    <!--
+      Any other exit code: the generator didn't run or didn't finish, because dotnet wasn't found or couldn't start it (the package's tools folder is
+      incomplete, or no .NET 10 or later runtime was found) or it stopped, which the messages above say
+    -->
+    <PropertyGroup Condition="'$(_AotWrapperSeedingGenerateExitCode)' != '0' and '$(_AotWrapperSeedingGenerateExitCode)' != '10'
+                              and '$(_AotWrapperSeedingGenerateExitCode)' != ''">
+      <_AotWrapperSeedingNotRun>The AOT wrapper seeding generator didn't run or didn't finish:</_AotWrapperSeedingNotRun>
+      <_AotWrapperSeedingNotRun>$(_AotWrapperSeedingNotRun) &quot;$(_AotWrapperSeedingDotnet)&quot; exec exited with code</_AotWrapperSeedingNotRun>
+      <_AotWrapperSeedingNotRun>$(_AotWrapperSeedingNotRun) $(_AotWrapperSeedingGenerateExitCode) for $(_AotWrapperSeedingTool). The</_AotWrapperSeedingNotRun>
+      <_AotWrapperSeedingNotRun>$(_AotWrapperSeedingNotRun) messages above, which a normal build log (-v:n) shows, say why, such as</_AotWrapperSeedingNotRun>
+      <_AotWrapperSeedingNotRun>$(_AotWrapperSeedingNotRun) that dotnet wasn't found or found no .NET 10 or later runtime, or that</_AotWrapperSeedingNotRun>
+      <_AotWrapperSeedingNotRun>$(_AotWrapperSeedingNotRun) the generator stopped. To publish without the seeding, set</_AotWrapperSeedingNotRun>
+      <_AotWrapperSeedingNotRun>$(_AotWrapperSeedingNotRun) WasmAotWrapperSeeding to false. Please report this error at</_AotWrapperSeedingNotRun>
+      <_AotWrapperSeedingNotRun>$(_AotWrapperSeedingNotRun) $(_AotWrapperSeedingIssues). See $(_AotWrapperSeedingDocs)</_AotWrapperSeedingNotRun>
+    </PropertyGroup>
+
+    <Error Condition="'$(_AotWrapperSeedingNotRun)' != ''" Code="AOTSEED008" Text="$(_AotWrapperSeedingNotRun)" />
+  </Target>
+
+  <!-- A publish doesn't add its file writes to the build's list, which Clean deletes, so this removes the files -->
+  <Target Name="_AotWrapperSeedingClean"
+          AfterTargets="Clean"
+          DependsOnTargets="_AotWrapperSeedingProperties"
+          Condition="'$(_AotWrapperSeedingPlatform)' == 'true'">
+    <RemoveDir Directories="$(_AotWrapperSeedingDir)" />
+  </Target>
+
+  <!--
+    The seeding hooks _WasmAotCompileApp and reads _WasmShouldAOT, which the SDK doesn't document: should an SDK rename them, the seeding wouldn't
+    run, which this reports. The SDK AOT-compiles a publish in the nested build of WasmNestedPublishApp. The bootstrapper's own seeding, when there
+    is one, reports it itself.
+  -->
+  <Target Name="_AotWrapperSeedingCheckRan"
+          AfterTargets="WasmNestedPublishApp"
+          DependsOnTargets="_AotWrapperSeedingProperties"
+          Condition="'$(_AotWrapperSeedingPlatform)' == 'true' and '$(WasmAotWrapperSeeding)' == 'true' and '$(RunAOTCompilation)' == 'true'
+                     and '$(WasmAotProfilePath)' != '' and '$(UseMonoRuntime)' != 'false' and '$(_AotWrapperSeedingRan)' != 'true'
+                     and '$(WasmShellEnableAOTWrapperSeeding)' == ''">
+
+    <!-- Its first sentence is also the one of the generator's AOTSEED003 -->
+    <PropertyGroup>
+      <_AotWrapperSeedingNotHooked>Couldn't add the AOT wrapper seeding to this profile-guided AOT build, so the app can still</_AotWrapperSeedingNotHooked>
+      <_AotWrapperSeedingNotHooked>$(_AotWrapperSeedingNotHooked) crash as described in $(_AotWrapperSeedingDocs). The .NET SDK</_AotWrapperSeedingNotHooked>
+      <_AotWrapperSeedingNotHooked>$(_AotWrapperSeedingNotHooked) didn't run the targets that the seeding hooks</_AotWrapperSeedingNotHooked>
+      <_AotWrapperSeedingNotHooked>$(_AotWrapperSeedingNotHooked) (_WasmAotCompileApp, with _WasmShouldAOT true), which may have</_AotWrapperSeedingNotHooked>
+      <_AotWrapperSeedingNotHooked>$(_AotWrapperSeedingNotHooked) changed. Please report this warning at</_AotWrapperSeedingNotHooked>
+      <_AotWrapperSeedingNotHooked>$(_AotWrapperSeedingNotHooked) $(_AotWrapperSeedingIssues).</_AotWrapperSeedingNotHooked>
+    </PropertyGroup>
+
+    <Warning Code="AOTSEED003" Text="$(_AotWrapperSeedingNotHooked)" />
+  </Target>
+
+  <Target Name="AotWrapperSeedingCheck" AfterTargets="_WasmAotCompileApp" Condition="'$(_AotWrapperSeedingApplied)' == 'true'">
+    <PropertyGroup>
+      <!-- See AotWrapperSeedingGenerate. Only the seed profile is taken out, whatever else joined the path since. -->
+      <WasmAotProfilePath>$(WasmAotProfilePath.Replace(';$(_AotWrapperSeedProfile)', ''))</WasmAotProfilePath>
+
+      <!--
+        The bootstrapper and the SDK's Emscripten pack set EmscriptenUpstreamBinPath, from which the SDK sets _WasmLLVMPathForAOT. Without either,
+        the checker looks for llvm-nm on the PATH, and reports AOTSEED002 if it isn't there. The package's tests set _AotWrapperSeedingLlvmNm.
+      -->
+      <_AotWrapperSeedingLlvm>$(EmscriptenUpstreamBinPath)</_AotWrapperSeedingLlvm>
+      <_AotWrapperSeedingLlvm Condition="'$(_AotWrapperSeedingLlvm)' == ''">$(_WasmLLVMPathForAOT)</_AotWrapperSeedingLlvm>
+      <_AotWrapperSeedingLlvm>$([MSBuild]::EnsureTrailingSlash('$(_AotWrapperSeedingLlvm)'))</_AotWrapperSeedingLlvm>
+      <_AotWrapperSeedingLlvmExe>llvm-nm</_AotWrapperSeedingLlvmExe>
+      <_AotWrapperSeedingLlvmExe Condition="'$(_AotWrapperSeedingIsWindows)' == 'true'">llvm-nm.exe</_AotWrapperSeedingLlvmExe>
+      <_AotWrapperSeedingLlvmNm Condition="'$(_AotWrapperSeedingLlvmNm)' == ''">$(_AotWrapperSeedingLlvm)$(_AotWrapperSeedingLlvmExe)</_AotWrapperSeedingLlvmNm>
+
+      <!-- The seeding requires deduplication, which emits every wrapper into the aot-instances module -->
+      <_AotWrapperSeedingBitcode>@(_BitcodeFile->WithMetadataValue('Filename', 'aot-instances.dll')->'%(FullPath)')</_AotWrapperSeedingBitcode>
+
+      <_AotWrapperSeedingCheckArgs>--expected-wrappers &quot;$(_AotWrapperSeedExpectedWrappers)&quot;</_AotWrapperSeedingCheckArgs>
+      <_AotWrapperSeedingCheckArgs>$(_AotWrapperSeedingCheckArgs) --bitcode &quot;$(_AotWrapperSeedingBitcode)&quot;</_AotWrapperSeedingCheckArgs>
+      <_AotWrapperSeedingCheckArgs>$(_AotWrapperSeedingCheckArgs) --llvm-nm &quot;$(_AotWrapperSeedingLlvmNm)&quot;</_AotWrapperSeedingCheckArgs>
+      <_AotWrapperSeedingCheckArgs>$(_AotWrapperSeedingCheckArgs) --messages &quot;$(_AotWrapperSeedingCheckMessages).&quot;</_AotWrapperSeedingCheckArgs>
+      <_AotWrapperSeedingCheckArgs>$(_AotWrapperSeedingCheckArgs) --docs &quot;$(_AotWrapperSeedingDocs)&quot;</_AotWrapperSeedingCheckArgs>
+      <_AotWrapperSeedingCheckArgs>$(_AotWrapperSeedingCheckArgs) --issues &quot;$(_AotWrapperSeedingIssues)&quot;</_AotWrapperSeedingCheckArgs>
+    </PropertyGroup>
+
+    <!--
+      Added to the bitcode compiled with the seeds before, so that the bitcode of one kind of build (a build that AOT-compiles with
+      RunAOTCompilationAfterBuild, which writes to wasm/for-build) doesn't hide the other's (a publish's, in wasm/for-publish) from
+      _AotWrapperSeedingForget.
+    -->
+    <ReadLinesFromFile File="$(_AotWrapperSeedingCompiled)" Condition="Exists('$(_AotWrapperSeedingCompiled)')">
+      <Output TaskParameter="Lines" ItemName="_AotWrapperSeedingCompiledBefore" />
+    </ReadLinesFromFile>
+
+    <RemoveDuplicates Inputs="@(_AotWrapperSeedingCompiledBefore);$(_AotWrapperSeedingBitcode)">
+      <Output TaskParameter="Filtered" ItemName="_AotWrapperSeedingCompiledNow" />
+    </RemoveDuplicates>
+
+    <WriteLinesToFile File="$(_AotWrapperSeedingCompiled)" Lines="@(_AotWrapperSeedingCompiledNow)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+
+    <RemoveDir Directories="$(_AotWrapperSeedingCheckMessages)" />
+
+    <!--
+      As for the generation, Exec doesn't read errors from the output: the checker writes them to the messages folder. Exit code 11: wrappers are
+      missing, after AOTSEED001 errors; 12: the check couldn't be made, after an AOTSEED002 error.
+    -->
+    <Exec Condition="'$(WasmAotWrapperSeedingCheck)' == 'true'"
+          Command="$(_AotWrapperSeedingRun) verify $(_AotWrapperSeedingCheckArgs)"
+          IgnoreExitCode="true"
+          IgnoreStandardErrorWarningFormat="true"
+          StdOutEncoding="utf-8"
+          StdErrEncoding="utf-8"
+          StandardOutputImportance="normal"
+          StandardErrorImportance="high">
+      <Output TaskParameter="ExitCode" PropertyName="_AotWrapperSeedingCheckExitCode" />
+    </Exec>
+
+    <ReadLinesFromFile File="$(_AotWrapperSeedingCheckMessages)AOTSEED001.txt" Condition="Exists('$(_AotWrapperSeedingCheckMessages)AOTSEED001.txt')">
+      <Output TaskParameter="Lines" ItemName="_AotWrapperSeedingAOTSEED001" />
+    </ReadLinesFromFile>
+
+    <ReadLinesFromFile File="$(_AotWrapperSeedingCheckMessages)AOTSEED002.txt" Condition="Exists('$(_AotWrapperSeedingCheckMessages)AOTSEED002.txt')">
+      <Output TaskParameter="Lines" ItemName="_AotWrapperSeedingAOTSEED002" />
+    </ReadLinesFromFile>
+
+    <!-- Each missing wrapper is an error of its own, and the error after them stops the build -->
+    <Error Condition="'%(_AotWrapperSeedingAOTSEED001.Identity)' != ''"
+           Code="AOTSEED001"
+           Text="%(_AotWrapperSeedingAOTSEED001.Identity)"
+           ContinueOnError="ErrorAndContinue" />
+
+    <Error Condition="'%(_AotWrapperSeedingAOTSEED002.Identity)' != ''" Code="AOTSEED002" Text="%(_AotWrapperSeedingAOTSEED002.Identity)" />
+
+    <PropertyGroup Condition="'$(WasmAotWrapperSeedingCheck)' == 'true' and '$(_AotWrapperSeedingCheckExitCode)' == '11'">
+      <_AotWrapperSeedingCheckFailure>The AOT wrapper seeding check failed: the build lacks the code that the errors above</_AotWrapperSeedingCheckFailure>
+      <_AotWrapperSeedingCheckFailure>$(_AotWrapperSeedingCheckFailure) name. To publish anyway, set WasmAotWrapperSeedingCheck</_AotWrapperSeedingCheckFailure>
+      <_AotWrapperSeedingCheckFailure>$(_AotWrapperSeedingCheckFailure) to false, which keeps the seeding. See</_AotWrapperSeedingCheckFailure>
+      <_AotWrapperSeedingCheckFailure>$(_AotWrapperSeedingCheckFailure) $(_AotWrapperSeedingDocs)</_AotWrapperSeedingCheckFailure>
+    </PropertyGroup>
+
+    <Error Condition="'$(_AotWrapperSeedingCheckFailure)' != ''" Code="AOTSEED001" Text="$(_AotWrapperSeedingCheckFailure)" />
+
+    <!--
+      Any other exit code: the checker didn't run or didn't finish, because dotnet wasn't found or couldn't start it (the package's tools folder is
+      incomplete, or no .NET 10 or later runtime was found) or it stopped
+    -->
+    <PropertyGroup Condition="'$(WasmAotWrapperSeedingCheck)' == 'true' and '$(_AotWrapperSeedingCheckExitCode)' != '0'
+                              and '$(_AotWrapperSeedingCheckExitCode)' != '11'">
+      <_AotWrapperSeedingCheckNotRun>Couldn't check the AOT wrapper seeding of this profile-guided AOT build: the checker didn't</_AotWrapperSeedingCheckNotRun>
+      <_AotWrapperSeedingCheckNotRun>$(_AotWrapperSeedingCheckNotRun) run or didn't finish</_AotWrapperSeedingCheckNotRun>
+      <_AotWrapperSeedingCheckNotRun>$(_AotWrapperSeedingCheckNotRun) (&quot;$(_AotWrapperSeedingDotnet)&quot; exec exited with</_AotWrapperSeedingCheckNotRun>
+      <_AotWrapperSeedingCheckNotRun>$(_AotWrapperSeedingCheckNotRun) code $(_AotWrapperSeedingCheckExitCode) for</_AotWrapperSeedingCheckNotRun>
+      <_AotWrapperSeedingCheckNotRun>$(_AotWrapperSeedingCheckNotRun) $(_AotWrapperSeedingTool)). The messages above, which a</_AotWrapperSeedingCheckNotRun>
+      <_AotWrapperSeedingCheckNotRun>$(_AotWrapperSeedingCheckNotRun) normal build log (-v:n) shows, say why, such as that</_AotWrapperSeedingCheckNotRun>
+      <_AotWrapperSeedingCheckNotRun>$(_AotWrapperSeedingCheckNotRun) dotnet wasn't found or found no .NET 10 or later runtime.</_AotWrapperSeedingCheckNotRun>
+      <_AotWrapperSeedingCheckNotRun>$(_AotWrapperSeedingCheckNotRun) To skip the check, set WasmAotWrapperSeedingCheck to</_AotWrapperSeedingCheckNotRun>
+      <_AotWrapperSeedingCheckNotRun>$(_AotWrapperSeedingCheckNotRun) false. Please report this error at</_AotWrapperSeedingCheckNotRun>
+      <_AotWrapperSeedingCheckNotRun>$(_AotWrapperSeedingCheckNotRun) $(_AotWrapperSeedingIssues). See $(_AotWrapperSeedingDocs)</_AotWrapperSeedingCheckNotRun>
+    </PropertyGroup>
+
+    <Error Condition="'$(_AotWrapperSeedingCheckNotRun)' != ''" Code="AOTSEED002" Text="$(_AotWrapperSeedingCheckNotRun)" />
+  </Target>
+</Project>
