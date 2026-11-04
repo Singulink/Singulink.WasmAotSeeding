@@ -43,7 +43,7 @@ It only acts in projects that build for WebAssembly, and in their builds that AO
 
 ```xml
 <ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'browserwasm'">
-  <PackageReference Include="Singulink.WasmAotSeeding" Version="1.0.0" PrivateAssets="all" />
+  <PackageReference Include="Singulink.WasmAotSeeding" Version="1.0.1" PrivateAssets="all" />
 </ItemGroup>
 ```
 

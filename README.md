@@ -44,13 +44,13 @@ For how it works, what it costs and the full details, see [HOW-IT-WORKS.md](http
 Add the package to the WebAssembly app project:
 
 ```xml
-<PackageReference Include="Singulink.WasmAotSeeding" Version="1.0.0" PrivateAssets="all" />
+<PackageReference Include="Singulink.WasmAotSeeding" Version="1.0.1" PrivateAssets="all" />
 ```
 
 With central package management, the `PackageReference` has no `Version` (NuGet fails with `NU1008` otherwise), and `Directory.Packages.props` has it:
 
 ```xml
-<PackageVersion Include="Singulink.WasmAotSeeding" Version="1.0.0" />
+<PackageVersion Include="Singulink.WasmAotSeeding" Version="1.0.1" />
 ```
 
 ### When It Acts
