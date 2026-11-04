@@ -1,7 +1,7 @@
 // The AOT wrapper seeding of profile-guided Mono WebAssembly AOT builds, which build\Singulink.WasmAotSeeding.targets runs with dotnet exec: "generate"
 // before the AOT compilation and "verify" after it. They do what GenerateAOTWrapperSeedsTask and ValidateAOTWrapperSeedsTask do in Uno.Wasm.Bootstrap,
 // whose seeding code the files of Upstream/ copy, with this package's AOTSEED codes. They write their warnings and errors to files of the --messages
-// folder, which the targets log, and their other messages to the standard output. See README.md.
+// folder, which the targets log, and their other messages to the standard output. See MAINTAINING.md.
 
 using System;
 using System.Linq;

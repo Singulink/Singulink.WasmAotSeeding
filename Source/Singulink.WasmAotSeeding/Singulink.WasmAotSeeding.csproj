@@ -1,6 +1,6 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <!-- The generator that build\Singulink.WasmAotSeeding.targets runs with dotnet exec, in a process of its own: see README.md. -->
+    <!-- The generator that build\Singulink.WasmAotSeeding.targets runs with dotnet exec, in a process of its own: see MAINTAINING.md. -->
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <!-- Runs on a later .NET too, when the machine that builds the app has no .NET 10 runtime. -->

@@ -1,7 +1,6 @@
 <Project>
   <!--
-    Singulink.WasmAotSeeding: AOT wrapper seeding for profile-guided Mono WebAssembly AOT builds, the seeding that
-    https://github.com/unoplatform/Uno.Wasm.Bootstrap/pull/1117 proposes to add to Uno.Wasm.Bootstrap, for apps whose bootstrapper doesn't have it.
+    Singulink.WasmAotSeeding: AOT wrapper seeding for profile-guided Mono WebAssembly AOT builds.
     See README.md in the package, or https://github.com/Singulink/Singulink.WasmAotSeeding.
 
     NuGet imports this file for every target framework of the projects that reference the package. It does nothing unless the project builds for
@@ -24,7 +23,7 @@
       WasmAotWrapperSeedingCheck          false turns the check off (default true); the seeding still applies.
       WasmAotWrapperSeedingAssemblyName   name of the seed assembly (default AotWrapperSeeds).
 
-    This depends on names of the .NET WebAssembly SDK that aren't public (README.md, "Maintenance") and on internals of the Mono AOT compiler. It
+    This depends on names of the .NET WebAssembly SDK that aren't public (MAINTAINING.md, "SDK Names") and on internals of the Mono AOT compiler. It
     was verified on Windows against .NET 10.0.12 and 10.0.14.
   -->
   <!--

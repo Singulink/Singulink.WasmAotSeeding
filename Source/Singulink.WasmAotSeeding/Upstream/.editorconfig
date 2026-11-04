@@ -1,4 +1,4 @@
-# The files of this folder copy the AOT wrapper seeding of Uno.Wasm.Bootstrap (see "Maintenance" in README.md), and stay as close to it as they
+# The files of this folder copy the AOT wrapper seeding of Uno.Wasm.Bootstrap (see MAINTAINING.md), and stay as close to it as they
 # can, so that a diff against a later version only shows what changed there. These rules would change many lines that it writes otherwise.
 
 [*.cs]
